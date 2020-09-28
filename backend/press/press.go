@@ -6,12 +6,14 @@ import (
 	"bytes"
 	"context"
 	"crypto/md5"
+	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"io/ioutil"
+	"regexp"
 	"strings"
 	"time"
 
@@ -38,7 +40,8 @@ const (
 	heuristicBytes      = 1048576
 	minCompressionRatio = 1.1
 
-	metaFileExt         = ".meta"
+	gzFileExt           = ".gz"
+	metaFileExt         = ".json"
 	uncompressedFileExt = ".bin"
 )
 
@@ -47,6 +50,8 @@ const (
 	Uncompressed = 0
 	Gzip         = 2
 )
+
+var nameRegexp = regexp.MustCompile("^(.+?)\\.([A-Za-z0-9+_]{11})$")
 
 // Register with Fs
 func init() {
@@ -183,15 +188,15 @@ func compressionModeFromName(name string) int {
 }
 
 // Converts an int64 to hex
-func int64ToHex(number int64) string {
+func int64ToBase64(number int64) string {
 	intBytes := make([]byte, 8)
 	binary.LittleEndian.PutUint64(intBytes, uint64(number))
-	return hex.EncodeToString(intBytes)
+	return base64.RawURLEncoding.EncodeToString(intBytes)
 }
 
 // Converts hex to int64
-func hexToInt64(hexNumber string) (int64, error) {
-	intBytes, err := hex.DecodeString(hexNumber)
+func base64ToInt64(str string) (int64, error) {
+	intBytes, err := base64.RawStdEncoding.DecodeString(str)
 	if err != nil {
 		return 0, err
 	}
@@ -206,24 +211,20 @@ func processFileName(compressedFileName string) (origFileName string, extension 
 	if extensionPos == -1 {
 		return "", "", 0, errors.New("File name has no extension")
 	}
-	nameWithSize := compressedFileName[:extensionPos]
 	extension = compressedFileName[extensionPos:]
-	// Separate the name with the size if this is a compressed file. Otherwise, just return nameWithSize (because it has no size appended)
-	var name string
-	var size int64
+	nameWithSize := compressedFileName[:extensionPos]
 	if extension == uncompressedFileExt {
-		name = nameWithSize
-		size = -2
-	} else {
-		sizeLoc := len(nameWithSize) - 16
-		name = nameWithSize[:sizeLoc]
-		size, err = hexToInt64(nameWithSize[sizeLoc:])
-		if err != nil {
-			return "", "", 0, errors.New("Could not decode size")
-		}
+		return nameWithSize, extension, -2, nil
 	}
-	// Return everything
-	return name, extension, size, nil
+	match := nameRegexp.FindStringSubmatch(nameWithSize)
+	if match == nil || len(match) != 3 {
+		return "", "", 0, errors.New("Invalid filename")
+	}
+	size, err := base64ToInt64(match[2])
+	if err != nil {
+		return "", "", 0, errors.New("Could not decode size")
+	}
+	return match[1], gzFileExt, size, nil
 }
 
 // Generates the file name for a metadata file
@@ -239,7 +240,7 @@ func isMetadataFile(filename string) bool {
 // Generates the file name for a data file
 func makeDataName(remote string, size int64, mode int) (newRemote string) {
 	if mode > 0 {
-		newRemote = remote + int64ToHex(size) + ".gz"
+		newRemote = remote + "." + int64ToBase64(size) + gzFileExt
 	} else {
 		newRemote = remote + uncompressedFileExt
 	}
