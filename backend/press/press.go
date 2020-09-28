@@ -4,12 +4,11 @@ package press
 import (
 	"bufio"
 	"bytes"
-	"compress/gzip"
 	"context"
 	"crypto/md5"
 	"encoding/binary"
-	"encoding/gob"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -352,7 +351,7 @@ func (f *Fs) NewObject(ctx context.Context, remote string) (fs.Object, error) {
 		return nil, errors.New("error decoding metadata")
 	}
 	// Create our Object
-	o, err := f.Fs.NewObject(ctx, makeDataName(remote, meta.Size, meta.Mode))
+	o, err := f.Fs.NewObject(ctx, makeDataName(remote, meta.CompressionMetadata.Size, meta.Mode))
 	return f.newObject(o, mo, meta), err
 }
 
@@ -495,7 +494,7 @@ func (f *Fs) putCompress(ctx context.Context, in io.Reader, src fs.ObjectInfo, o
 	}
 
 	// Generate metadata
-	meta := newMetadata(result.meta.Size, f.mode, result.meta, metaHasher.Sum(nil), mimeType)
+	meta := newMetadata(result.meta.Size, f.mode, result.meta, hex.EncodeToString(metaHasher.Sum(nil)), mimeType)
 
 	// Check the hashes of the compressed data if we were comparing them
 	if ht != hash.None && hasher != nil {
@@ -549,27 +548,20 @@ func (f *Fs) putUncompress(ctx context.Context, in io.Reader, src fs.ObjectInfo,
 	if err != nil {
 		return nil, nil, err
 	}
-	return o, newMetadata(o.Size(), Uncompressed, sgzip.GzipMetadata{}, sum, mimeType), nil
+	return o, newMetadata(o.Size(), Uncompressed, sgzip.GzipMetadata{}, hex.EncodeToString(sum), mimeType), nil
 }
 
 // This function will write a metadata struct to a metadata Object for an src. Returns a wrappable metadata object.
 func (f *Fs) putMetadata(ctx context.Context, meta *ObjectMetadata, src fs.ObjectInfo, options []fs.OpenOption, put putFn) (mo fs.Object, err error) {
 	// Generate the metadata contents
-	var b bytes.Buffer
-	gzipWriter := gzip.NewWriter(&b)
-	metadataEncoder := gob.NewEncoder(gzipWriter)
-	err = metadataEncoder.Encode(meta)
+	data, err := json.Marshal(meta)
 	if err != nil {
 		return nil, err
 	}
-	err = gzipWriter.Close()
-	if err != nil {
-		return nil, err
-	}
-	metaReader := bytes.NewReader(b.Bytes())
+	metaReader := bytes.NewReader(data)
 
 	// Put the data
-	mo, err = put(ctx, metaReader, f.wrapInfo(src, makeMetadataName(src.Remote()), int64(b.Len())), options...)
+	mo, err = put(ctx, metaReader, f.wrapInfo(src, makeMetadataName(src.Remote()), int64(len(data))), options...)
 	if err != nil {
 		removeErr := mo.Remove(ctx)
 		if removeErr != nil {
@@ -944,7 +936,7 @@ func (f *Fs) PublicLink(ctx context.Context, remote string, duration fs.Duration
 type ObjectMetadata struct {
 	Size                int64  // Uncompressed size of the file.
 	Mode                int    // Compression mode of the file.
-	Hash                []byte // MD5 hash of the file.
+	MD5                 string // MD5 hash of the file.
 	MimeType            string // Mime type of the file
 	CompressionMetadata sgzip.GzipMetadata
 }
@@ -960,12 +952,11 @@ type Object struct {
 }
 
 // This function generates a metadata object
-func newMetadata(size int64, mode int, cmeta sgzip.GzipMetadata, hash []byte, mimeType string) *ObjectMetadata {
+func newMetadata(size int64, mode int, cmeta sgzip.GzipMetadata, md5 string, mimeType string) *ObjectMetadata {
 	meta := new(ObjectMetadata)
-	meta.Size = size
 	meta.Mode = mode
 	meta.CompressionMetadata = cmeta
-	meta.Hash = hash
+	meta.MD5 = md5
 	meta.MimeType = mimeType
 	return meta
 }
@@ -983,18 +974,9 @@ func readMetadata(ctx context.Context, mo fs.Object) (meta *ObjectMetadata) {
 			fs.Errorf(mo, "Error closing object: %v", err)
 		}
 	}()
-	// Read gzipped compressed data from it
-	gzipReader, err := gzip.NewReader(rc)
-	if err != nil {
-		return nil
-	}
-	// Decode the gob from that
+	jr := json.NewDecoder(rc)
 	meta = new(ObjectMetadata)
-	metadataDecoder := gob.NewDecoder(gzipReader)
-	err = metadataDecoder.Decode(meta)
-	// Cleanup and return
-	_ = gzipReader.Close() // We don't really care if this is closed properly
-	if err != nil {
+	if err = jr.Decode(meta); err != nil {
 		return nil
 	}
 	return meta
@@ -1072,7 +1054,7 @@ func (f *Fs) newObject(o fs.Object, mo fs.Object, meta *ObjectMetadata) *Object 
 		f:      f,
 		mo:     mo,
 		moName: mo.Remote(),
-		size:   meta.Size,
+		size:   meta.CompressionMetadata.Size,
 		meta:   meta,
 	}
 }
@@ -1137,7 +1119,7 @@ func (o *Object) Size() int64 {
 	if o.meta == nil {
 		return o.size
 	}
-	return o.meta.Size
+	return o.meta.CompressionMetadata.Size
 }
 
 // MimeType returns the MIME type of the file
@@ -1159,7 +1141,7 @@ func (o *Object) Hash(ctx context.Context, ht hash.Type) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return hex.EncodeToString(o.meta.Hash), nil
+	return o.meta.MD5, nil
 }
 
 // SetTier performs changing storage tier of the Object if
