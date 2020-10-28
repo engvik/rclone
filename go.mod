@@ -70,5 +70,5 @@ require (
 	google.golang.org/protobuf v1.25.0 // indirect
 	gopkg.in/yaml.v2 v2.3.0
 	gopkg.in/yaml.v3 v3.0.0-20200615113413-eeeca48fe776 // indirect
-	storj.io/uplink v1.2.0
+	storj.io/uplink v1.3.1
 )
